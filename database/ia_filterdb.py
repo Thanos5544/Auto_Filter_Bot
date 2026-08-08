@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# Global cache for DB size
-_db_stats_cache = {"timestamp": None, "primary_size": 0.0}
+# FIXED CACHE - per DB alag
+_db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
 def compile_regex(pattern):
@@ -102,24 +102,19 @@ class Media3(Document):
         collection_name = COLLECTION_NAME
 
 
-async def check_db_size(db):
+async def check_db_size(db_obj):
     try:
+        # per-db cache with 30 sec TTL - FIXED
+        key = id(db_obj)
         now = datetime.utcnow()
-        cache_stale_by_time = _db_stats_cache["timestamp"] is None or (
-            now - _db_stats_cache["timestamp"] > timedelta(minutes=10)
-        )
-        refresh_if_size_threshold = _db_stats_cache["primary_size"] >= 10.0
-        if not cache_stale_by_time and not refresh_if_size_threshold:
-            return _db_stats_cache["primary_size"]
-        stats = await db.command("dbstats")
-        db_logical_size = stats["dataSize"]
-        db_index_size = stats["indexSize"]
-        db_logical_size_mb = db_logical_size / (1024 * 1024)
-        db_index_size_mb = db_index_size / (1024 * 1024)
-        db_size_mb = db_logical_size_mb + db_index_size_mb
-        _db_stats_cache["primary_size"] = db_size_mb
-        _db_stats_cache["timestamp"] = now
-        return db_size_mb
+        if key in _db_stats_cache:
+            ts, size = _db_stats_cache[key]
+            if now - ts < timedelta(seconds=30):
+                return size
+        stats = await db_obj.command("dbstats")
+        size_mb = (stats["dataSize"] + stats["indexSize"]) / (1024 * 1024)
+        _db_stats_cache[key] = (now, size_mb)
+        return size_mb
     except Exception:
         logger.exception("Error checking database size")
         return 0
