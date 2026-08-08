@@ -166,20 +166,21 @@ async def get_stats(bot, message):
         file1 = await Media.count_documents()
         DB_SIZE = 512 * 1024 * 1024
         
-        # Calculate size for Current Primary DB
+        # Correct Size - dataSize + indexSize (Atlas wala hisab)
         dbstats = await db_stats.command("dbStats")
-        current_db_size = dbstats['storageSize'] + dbstats['indexSize']
+        current_db_size = dbstats['dataSize'] + dbstats['indexSize']
 
-        # Calculate total size for Primary DB Cluster
+        # Cluster Size - dataSize + indexSize for all DBs
         dbs = await client.list_database_names()
         db_size = 0
         for db_name in dbs:
             if db_name in ["admin", "local"]:
                 continue
             stats = await client[db_name].command("dbStats")
-            db_size += stats['storageSize'] + stats['indexSize']
+            db_size += stats['dataSize'] + stats['indexSize']
             
         free = DB_SIZE - db_size
+        if free < 0: free = 0
         uptime = get_readable_time(time() - botStartTime)
         ram = psutil.virtual_memory().percent
         cpu = psutil.cpu_percent()
@@ -191,34 +192,33 @@ async def get_stats(bot, message):
             
         file2 = await Media2.count_documents()
         
-        # Calculate size for Current Secondary DB
         db2stats = await db2_stats.command("dbStats")
-        current_db2_size = db2stats['storageSize'] + db2stats['indexSize']
+        current_db2_size = db2stats['dataSize'] + db2stats['indexSize']
 
-        # Calculate total size for Secondary DB Cluster
         dbs2 = await client2.list_database_names()
         db2_size = 0
         for db_name in dbs2:
             if db_name in ["admin", "local"]:
                 continue
             stats = await client2[db_name].command("dbStats")
-            db2_size += stats['storageSize'] + stats['indexSize']
+            db2_size += stats['dataSize'] + stats['indexSize']
             
         free2 = DB_SIZE - db2_size
+        if free2 < 0: free2 = 0
 
-        # Calculate for Tertiary DB - 3rd DB
         if DATABASE_URI3:
             file3 = await Media3.count_documents()
             db3stats = await db3_stats.command("dbStats")
-            current_db3_size = db3stats['storageSize'] + db3stats['indexSize']
+            current_db3_size = db3stats['dataSize'] + db3stats['indexSize']
             dbs3 = await client3.list_database_names()
             db3_size = 0
             for db_name in dbs3:
                 if db_name in ["admin", "local"]:
                     continue
                 stats = await client3[db_name].command("dbStats")
-                db3_size += stats['storageSize'] + stats['indexSize']
+                db3_size += stats['dataSize'] + stats['indexSize']
             free3 = DB_SIZE - db3_size
+            if free3 < 0: free3 = 0
         else:
             file3 = 0
             current_db3_size = 0
