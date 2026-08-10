@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# ---- LIMITS - 407 -> 480 -> 512 ----
+# ---- LIMITS - 407 -> 2nd , 480 -> 3rd , 3rd 512 tak ----
 PRIMARY_LIMIT = 407
 SECONDARY_LIMIT = 480
 
-# FIXED CACHE - per DB alag
+# FIXED CACHE - per DB alag warna 412 pe atak jayega
 _db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
@@ -124,7 +124,7 @@ async def save_file(media):
     target_db = "Primary"
     if MULTIPLE_DB:
         try:
-            # ---- DUPLICATE CHECK TEENO DB ME ----
+            # ---- DUPLICATE TEENO DB ME CHECK ----
             if await Media.find_one({"file_id": file_id}):
                 logger.info(f"[SKIP] '{file_name}' already in Primary DB.")
                 return False, 0
