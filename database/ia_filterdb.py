@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# FIXED CACHE - per DB alag
+# ---- LIMITS ----
+PRIMARY_LIMIT = 407
+SECONDARY_LIMIT = 480
+
+# FIXED CACHE - per DB alag (3 DB ke liye)
 _db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
@@ -104,7 +108,6 @@ class Media3(Document):
 
 async def check_db_size(db_obj):
     try:
-        # per-db cache with 30 sec TTL - FIXED
         key = id(db_obj)
         now = datetime.utcnow()
         if key in _db_stats_cache:
@@ -147,10 +150,10 @@ async def save_file(media):
                     return False, 0
 
             primary_db_size = await check_db_size(db)
-            if primary_db_size >= 407:
+            if primary_db_size >= PRIMARY_LIMIT:
                 if DATABASE_URI3:
                     secondary_db_size = await check_db_size(db2)
-                    if secondary_db_size >= 407:
+                    if secondary_db_size >= SECONDARY_LIMIT:
                         saveMedia = Media3
                         target_db = "Tertiary"
                         logger.warning("Switching to Tertiary DB due to size threshold.")
@@ -397,10 +400,10 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
         if MULTIPLE_DB:
             db_size = await check_db_size(db)
-            if db_size > 407:
+            if db_size > PRIMARY_LIMIT:
                 if DATABASE_URI3:
                     db2_size = await check_db_size(db2)
-                    if db2_size > 407:
+                    if db2_size > SECONDARY_LIMIT:
                         cursor = Media3.find().sort("$natural", -1).limit(limit)
                         files = await cursor.to_list(length=limit)
                         return files
