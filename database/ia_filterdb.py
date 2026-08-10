@@ -202,74 +202,40 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             await save_group_settings(int(chat_id), "max_btn", True)
             settings["max_btn"] = True
         max_results = 10 if settings["max_btn"] else int(MAX_B_TN)
-
-    # helper - relevance score
-    def _score(file_name, q):
-        try:
-            fn = file_name.lower()
-            qq = q.lower().strip()
-            if not qq:
-                return 0
-            # 1. exact file name match
-            if fn == qq:
-                return 1000
-            # 2. start with query + word boundary -> avengers 2012 > avengers assemble me farak yahi karega
-            # avengers ke baad space ya . _ - + ho
-            if re.match(rf"^{re.escape(qq)}(\b|[\.\s\-\+_])", fn):
-                # chhota naam = jyada exact (avengers 2012 < avengers assemble extended)
-                return 900 - len(fn) * 0.01
-            # 3. query as separate word at start
-            if fn.startswith(qq):
-                return 850
-            # 4. exact phrase kahin bhi
-            if qq in fn:
-                pos = fn.find(qq)
-                return 700 - pos  # jitna pehle aayega utna upar
-            # 5. saare words hain
-            words = [w for w in qq.split() if w]
-            if all(w in fn for w in words):
-                return 500
-            # 6. koi ek word
-            if any(w in fn for w in words):
-                return 100
-            return 0
-        except:
-            return 0
-
     if isinstance(query, list):
         raw_pattern = "|".join(re.escape(q.strip()) for q in query if q and q.strip())
         if not raw_pattern:
             return [], None, 0
         regex = compile_regex(raw_pattern)
-        clean_query = " ".join(query)
-        filter_mongo = {"$or": [{"file_name": regex},{"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
+        if USE_CAPTION_FILTER:
+            filter_mongo = {"$or": [{"file_name": regex},{"caption": regex},]}
+        else:
+            filter_mongo = {"file_name": regex}
     else:
         query = query.strip()
         if not query:
             return [], None, 0
-        clean_query = query
         if " " in query:
             words = [re.escape(w) for w in query.split() if w]
             raw_pattern = (r".*[\s\.\+\-_]".join(words) if words else r".")
         else:
-            # EXACT WORD MATCH - beech ka word match nahi karega ab
             raw_pattern = (r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])" )
         try:
             regex = compile_regex(raw_pattern)
         except re.error:
             return [], None, 0
-        filter_mongo = { "$or": [{"file_name": regex}, {"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
+        if USE_CAPTION_FILTER:
+            filter_mongo = { "$or": [{"file_name": regex}, {"caption": regex},]}
+        else:
+            filter_mongo = {"file_name": regex}
 
     if file_type:
         filter_mongo["file_type"] = file_type
 
-    # jyada fetch karo taaki relevance sort kar sake
-    fetch_extra = 3  # 10 manga hai to 30 fetch karega aur best 10 dega
-    limit = (max_results + 1) * fetch_extra
-
     if ULTRA_FAST_MODE:
-        fetch_limit = offset + limit
+        limit = max_results + 1
         if MULTIPLE_DB:
+            fetch_limit = offset + limit
             if DATABASE_URI3:
                 results = await asyncio.gather(
                     Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
@@ -277,29 +243,24 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                     Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                 )
                 files = results[2] + results[1] + results[0]
+                files = files[offset:offset + limit]
             else:
                 results = await asyncio.gather(
                     Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                     Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                 )
                 files = results[1] + results[0]
+                files = files[offset:offset + limit]
         else:
-            files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-        
-        # --- RELEVANCE SORT YAHI HOGA ---
-        # avengers -> avengers 2012 (900 score) > avengers assemble (850-900 but lamba naam)
-        files.sort(key=lambda f: _score(getattr(f, 'file_name', ''), clean_query), reverse=True)
-        files = files[offset:offset + max_results + 1]
-
+            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
         has_next_page = len(files) > max_results
         if has_next_page:
             files = files[:-1]
         next_offset = offset + len(files) if has_next_page else ""
         total_results = offset + len(files) + (1 if has_next_page else 0)
     else:
-        # normal mode me bhi same
-        fetch_limit = offset + limit
         if MULTIPLE_DB:
+            fetch_limit = offset + max_results
             if DATABASE_URI3:
                 count_results, find_results = await asyncio.gather(
                     asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)),
@@ -311,6 +272,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 )
                 total_results = sum(count_results)
                 files = find_results[2] + find_results[1] + find_results[0]
+                files = files[offset:offset + max_results]
             else:
                 count_results, find_results = await asyncio.gather(
                     asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)),
@@ -321,13 +283,10 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 )
                 total_results = sum(count_results)
                 files = find_results[1] + find_results[0]
-            files.sort(key=lambda f: _score(getattr(f, 'file_name', ''), clean_query), reverse=True)
-            files = files[offset:offset + max_results]
+                files = files[offset:offset + max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
-            files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-            files.sort(key=lambda f: _score(getattr(f, 'file_name', ''), clean_query), reverse=True)
-            files = files[offset:offset + max_results]
+            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
         next_offset = offset + len(files)
         if next_offset >= total_results:
             next_offset = ""
