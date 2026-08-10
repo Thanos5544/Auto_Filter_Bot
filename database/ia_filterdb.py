@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# ---- LIMITS - Teri demand 407 -> 480 -> 512 ----
+# ---- LIMITS - 407 -> 480 -> 512 ----
 PRIMARY_LIMIT = 407
 SECONDARY_LIMIT = 480
 
-# FIXED CACHE - per DB alag warna 412 pe atak jayega jaisa pehle hua tha
+# FIXED CACHE - per DB alag
 _db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
@@ -124,8 +124,8 @@ async def save_file(media):
     target_db = "Primary"
     if MULTIPLE_DB:
         try:
-            exists = await Media.find_one({"file_id": file_id})
-            if exists:
+            # ---- DUPLICATE CHECK TEENO DB ME ----
+            if await Media.find_one({"file_id": file_id}):
                 logger.info(f"[SKIP] '{file_name}' already in Primary DB.")
                 return False, 0
             if DATABASE_URI2 and await Media2.find_one({"file_id": file_id}):
@@ -134,6 +134,7 @@ async def save_file(media):
             if DATABASE_URI3 and await Media3.find_one({"file_id": file_id}):
                 logger.info(f"[SKIP] '{file_name}' already in Tertiary DB.")
                 return False, 0
+
             primary_db_size = await check_db_size(db)
             if primary_db_size >= PRIMARY_LIMIT:
                 if DATABASE_URI3:
@@ -174,7 +175,7 @@ async def save_file(media):
         return False, 3
     return True, 1
 
-# ---- Yahi tera wala get_search_results - bas 3 DB jod diya ----
+# ---- WAHI TERA WALA get_search_results - BAS 3 DB JOD DIYA ----
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
     if chat_id is not None and max_results is None:
         settings = await get_settings(int(chat_id))
@@ -317,7 +318,6 @@ def unpack_new_file_id(new_file_id):
     file_id = encode_file_id(pack("<iiqq", int(decoded.file_type), decoded.dc_id, decoded.media_id, decoded.access_hash))
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
-
 async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
         if MULTIPLE_DB:
@@ -329,7 +329,6 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_fetch_media: {e}")
         return []
-
 async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     try:
         year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
@@ -347,7 +346,6 @@ async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     except Exception as e:
         logger.error(f"Error in truncate_title: {e}")
         return filename
-
 async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 2)
@@ -363,7 +361,6 @@ async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_get_movies: {e}")
         return []
-
 async def dreamxbotz_get_series(limit: int = 30) -> Dict[str, List[int]]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 5)
