@@ -17,7 +17,6 @@ from datetime import datetime, timedelta
 import asyncio
 from functools import lru_cache
 
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -52,7 +51,6 @@ else:
     client3 = client
     db3 = db
     instance3 = instance
-
 
 @instance.register
 class Media(Document):
@@ -170,17 +168,65 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             settings["max_btn"] = True
         max_results = 10 if settings["max_btn"] else int(MAX_B_TN)
 
+    def _extract_base(filename: str) -> str:
+        try:
+            year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
+            if year_match:
+                t = year_match.group(1).replace("(", "").replace(")", "")
+                t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
+                return t
+            season_match = re.search(r"(.*?)(?:S(\d{1,2})|Season\s*(\d+)|Season(\d+))(?:\s*Combined)?", filename, re.IGNORECASE)
+            if season_match:
+                t = season_match.group(1).strip()
+                t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
+                return t
+            t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", filename).strip().lower()
+            t = re.sub(r"\.(mp4|mkv|avi|mov|flv|webm)$", "", t)
+            t = re.split(r"\s+(1080p|720p|480p|2160p|4k|hevc|x264|x265|web-dl|bluray|hdr|esub)\b", t)[0]
+            return t.strip()
+        except:
+            return filename.lower()
+
     def _score(fn, q):
-        fn = fn.lower(); q = q.lower().strip()
-        if not q: return 0
-        if fn == q: return 1000
-        if re.match(rf"^{re.escape(q)}(\b|[\.\s\-\+_])", fn):
-            return 900 - len(fn)*0.01
-        if fn.startswith(q): return 850
-        if q in fn: return 700 - fn.find(q)
-        words = q.split()
-        if all(w in fn for w in words): return 500
-        if any(w in fn for w in words): return 100
+        fn_low = fn.lower()
+        q_low = q.lower().strip()
+        if not q_low:
+            return 0
+        norm_fn = re.sub(r"[._\-\[\]()]+", " ", fn_low)
+        norm_fn = re.sub(r"\s+", " ", norm_fn).strip()
+        base = _extract_base(fn)
+        if norm_fn == q_low:
+            return 1000
+        if base == q_low:
+            return 990
+        if base.startswith(q_low + " "):
+            q_words = q_low.split()
+            base_words = base.split()
+            extra = len(base_words) - len(q_words)
+            if extra < 0:
+                extra = 0
+            meta_pat = re.compile(r"^(s\d{1,2}|season\d+|e\d{1,2}|\d{4}|1080p|720p|480p|2160p|4k|hevc|x264|x265|web|bluray|hdrip|esub)$")
+            penalty = 0
+            if extra > 0:
+                extra_words = base_words[len(q_words):]
+                for w in extra_words:
+                    if meta_pat.match(w):
+                        penalty += 5
+                    else:
+                        penalty += 50
+            return 900 - penalty - len(fn)*0.005
+        if fn_low.startswith(q_low):
+            return 850
+        if re.search(rf"(\b|[\.\s\-\+_]){re.escape(q_low)}(\b|[\.\s\-\+_])", fn_low):
+            pos = fn_low.find(q_low)
+            return 700 - pos*0.1
+        if q_low in fn_low:
+            return 600 - fn_low.find(q_low)*0.1
+        q_words = q_low.split()
+        if all(w in fn_low for w in q_words):
+            return 500
+        if any(w in fn_low for w in q_words):
+            return 100
         return 0
 
     if isinstance(query, list):
@@ -203,7 +249,6 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         filter_mongo = {"$or": [{"file_name": regex},{"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
 
     if file_type: filter_mongo["file_type"] = file_type
-    # FAST - pehle se kam fetch, relevance sort fast
     fetch_extra = 2
     limit = (max_results + 1) * fetch_extra
     if ULTRA_FAST_MODE:
