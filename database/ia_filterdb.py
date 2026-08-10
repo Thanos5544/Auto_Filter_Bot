@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# FIXED CACHE - per DB alag
+# ---- LIMITS - 1st 407 pe 2nd me, 2nd 480 pe 3rd me ----
+PRIMARY_LIMIT = 407
+SECONDARY_LIMIT = 480
+
 _db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
@@ -104,7 +107,6 @@ class Media3(Document):
 
 async def check_db_size(db_obj):
     try:
-        # per-db cache with 30 sec TTL - FIXED
         key = id(db_obj)
         now = datetime.utcnow()
         if key in _db_stats_cache:
@@ -147,10 +149,10 @@ async def save_file(media):
                     return False, 0
 
             primary_db_size = await check_db_size(db)
-            if primary_db_size >= 407:
+            if primary_db_size >= PRIMARY_LIMIT:
                 if DATABASE_URI3:
                     secondary_db_size = await check_db_size(db2)
-                    if secondary_db_size >= 407:
+                    if secondary_db_size >= SECONDARY_LIMIT:
                         saveMedia = Media3
                         target_db = "Tertiary"
                         logger.warning("Switching to Tertiary DB due to size threshold.")
@@ -202,19 +204,116 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             await save_group_settings(int(chat_id), "max_btn", True)
             settings["max_btn"] = True
         max_results = 10 if settings["max_btn"] else int(MAX_B_TN)
+
+    def _extract_base(filename: str) -> str:
+        try:
+            year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
+            if year_match:
+                t = year_match.group(1).replace("(", "").replace(")", "")
+                t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
+                return t
+            season_match = re.search(r"(.*?)(?:S(\d{1,2})|Season\s*(\d+)|Season(\d+))(?:\s*Combined)?", filename, re.IGNORECASE)
+            if season_match:
+                t = season_match.group(1).strip()
+                t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
+                return t
+            t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", filename).strip().lower()
+            t = re.sub(r"\.(mp4|mkv|avi|mov|flv|webm)$", "", t)
+            t = re.split(r"\s+(1080p|720p|480p|2160p|4k|hevc|x264|x265|web-dl|bluray|hdr|esub)\b", t)[0]
+            return t.strip()
+        except:
+            return filename.lower()
+
+    def _get_season_ep(fn: str):
+        m = re.search(r"S0*(\d{1,2})(?:\s*E0*(\d{1,2}))?", fn, re.I)
+        if m:
+            s = int(m.group(1)) if m.group(1) else 999
+            e = int(m.group(2)) if m.group(2) else 999
+            return (s, e)
+        m2 = re.search(r"Season\s*0*(\d{1,2})", fn, re.I)
+        if m2:
+            return (int(m2.group(1)), 999)
+        return (999, 999)
+
+    def _score(fn, q):
+        fn_low = fn.lower()
+        q_low = q.lower().strip()
+        if not q_low:
+            return 0
+        base = _extract_base(fn)
+        q_season = None
+        q_base = q_low
+        mqs = re.search(r"\bS0*(\d{1,2})\b", q_low)
+        if mqs:
+            q_season = int(mqs.group(1))
+            q_base = re.sub(r"\bS0*\d{1,2}\b", "", q_low, flags=re.I)
+            q_base = re.sub(r"\bseason\s*0*\d{1,2}\b", "", q_base, flags=re.I)
+            q_base = re.sub(r"\s+", " ", q_base).strip()
+            if not q_base:
+                q_base = q_low
+        f_season, f_ep = _get_season_ep(fn)
+        if q_season is not None and f_season != q_season:
+            return 10
+        norm_fn = re.sub(r"[._\-\[\]()]+", " ", fn_low)
+        norm_fn = re.sub(r"\s+", " ", norm_fn).strip()
+        if norm_fn == q_base:
+            return 1000
+        if base == q_base:
+            return 990
+        if base.startswith(q_base + " "):
+            q_words = q_base.split()
+            base_words = base.split()
+            extra = len(base_words) - len(q_words)
+            penalty = 0
+            if extra > 0:
+                extra_words = base_words[len(q_words):]
+                meta_pat = re.compile(r"^(s\d{1,2}|season\d+|e\d{1,2}|\d{4}|1080p|720p|480p|2160p|4k|hevc|x264|x265|web|bluray|hdrip|esub)$")
+                for w in extra_words:
+                    if meta_pat.match(w):
+                        penalty += 5
+                    else:
+                        penalty += 50
+            return 900 - penalty - len(fn)*0.005
+        if fn_low.startswith(q_base):
+            return 850
+        if re.search(rf"(\b|[\.\s\-\+_]){re.escape(q_base)}(\b|[\.\s\-\+_])", fn_low):
+            return 700 - fn_low.find(q_base)*0.1
+        if q_base in fn_low:
+            return 600 - fn_low.find(q_base)*0.1
+        if all(w in fn_low for w in q_base.split()):
+            return 500
+        if any(w in fn_low for w in q_base.split()):
+            return 100
+        return 0
+
     if isinstance(query, list):
-        raw_pattern = "|".join(re.escape(q.strip()) for q in query if q and q.strip())
-        if not raw_pattern:
+        terms = [q.strip() for q in query if q and q.strip()]
+        if not terms:
             return [], None, 0
-        regex = compile_regex(raw_pattern)
-        if USE_CAPTION_FILTER:
-            filter_mongo = {"$or": [{"file_name": regex},{"caption": regex},]}
-        else:
-            filter_mongo = {"file_name": regex}
+        clean_query = " ".join(terms)
+        and_filters = []
+        for term in terms:
+            if " " in term:
+                words = [re.escape(w) for w in term.split() if w]
+                pat = r".*[\s\.\+\-_]" .join(words)
+            else:
+                pat = r"(\b|[\.\+\-_])" + re.escape(term) + r"(\b|[\.\+\-_])"
+            try:
+                rgx = compile_regex(pat)
+            except re.error:
+                continue
+            if USE_CAPTION_FILTER:
+                and_filters.append({"$or": [{"file_name": rgx}, {"caption": rgx}]})
+            else:
+                and_filters.append({"file_name": rgx})
+        if not and_filters:
+            return [], None, 0
+        filter_mongo = {"$and": and_filters} if len(and_filters) > 1 else and_filters[0]
     else:
         query = query.strip()
         if not query:
             return [], None, 0
+        clean_query = query
         if " " in query:
             words = [re.escape(w) for w in query.split() if w]
             raw_pattern = (r".*[\s\.\+\-_]".join(words) if words else r".")
@@ -232,10 +331,12 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     if file_type:
         filter_mongo["file_type"] = file_type
 
+    fetch_extra = 5
+    fetch_limit_base = (max_results + 1) * fetch_extra
+
     if ULTRA_FAST_MODE:
-        limit = max_results + 1
+        fetch_limit = offset + fetch_limit_base
         if MULTIPLE_DB:
-            fetch_limit = offset + limit
             if DATABASE_URI3:
                 results = await asyncio.gather(
                     Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
@@ -243,24 +344,24 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                     Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                 )
                 files = results[2] + results[1] + results[0]
-                files = files[offset:offset + limit]
             else:
                 results = await asyncio.gather(
                     Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                     Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                 )
                 files = results[1] + results[0]
-                files = files[offset:offset + limit]
         else:
-            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
+            files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
+        files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
+        files = files[offset:offset + max_results + 1]
         has_next_page = len(files) > max_results
         if has_next_page:
             files = files[:-1]
         next_offset = offset + len(files) if has_next_page else ""
         total_results = offset + len(files) + (1 if has_next_page else 0)
     else:
+        fetch_limit = offset + fetch_limit_base
         if MULTIPLE_DB:
-            fetch_limit = offset + max_results
             if DATABASE_URI3:
                 count_results, find_results = await asyncio.gather(
                     asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)),
@@ -272,7 +373,6 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 )
                 total_results = sum(count_results)
                 files = find_results[2] + find_results[1] + find_results[0]
-                files = files[offset:offset + max_results]
             else:
                 count_results, find_results = await asyncio.gather(
                     asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)),
@@ -283,10 +383,13 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 )
                 total_results = sum(count_results)
                 files = find_results[1] + find_results[0]
-                files = files[offset:offset + max_results]
+            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
+            files = files[offset:offset + max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
-            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
+            files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
+            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
+            files = files[offset:offset + max_results]
         next_offset = offset + len(files)
         if next_offset >= total_results:
             next_offset = ""
@@ -397,10 +500,10 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
         if MULTIPLE_DB:
             db_size = await check_db_size(db)
-            if db_size > 407:
+            if db_size > PRIMARY_LIMIT:
                 if DATABASE_URI3:
                     db2_size = await check_db_size(db2)
-                    if db2_size > 407:
+                    if db2_size > SECONDARY_LIMIT:
                         cursor = Media3.find().sort("$natural", -1).limit(limit)
                         files = await cursor.to_list(length=limit)
                         return files
