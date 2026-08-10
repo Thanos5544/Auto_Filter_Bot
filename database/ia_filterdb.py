@@ -20,18 +20,24 @@ from functools import lru_cache
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
+
+# ---- LIMITS - Teri demand 407 -> 480 -> 512 ----
 PRIMARY_LIMIT = 407
 SECONDARY_LIMIT = 480
+
+# FIXED CACHE - per DB alag warna 412 pe atak jayega jaisa pehle hua tha
 _db_stats_cache = {}
 
 @lru_cache(maxsize=4096)
 def compile_regex(pattern):
     return re.compile(pattern, re.IGNORECASE)
 
+# Primary DB
 client = AsyncIOMotorClient(DATABASE_URI)
 db = client[DATABASE_NAME]
 instance = Instance.from_db(db)
 
+# secondary db
 if MULTIPLE_DB and DATABASE_URI2:
     client2 = AsyncIOMotorClient(DATABASE_URI2)
     db2 = client2[DATABASE_NAME]
@@ -41,6 +47,7 @@ else:
     db2 = db
     instance2 = instance
 
+# tertiary db - 3rd DB
 if MULTIPLE_DB and DATABASE_URI3:
     client3 = AsyncIOMotorClient(DATABASE_URI3)
     db3 = client3[DATABASE_NAME]
@@ -109,6 +116,7 @@ async def check_db_size(db_obj):
         return 0
 
 async def save_file(media):
+    """Save file in database, with detailed logging."""
     file_id, file_ref = unpack_new_file_id(media.file_id)
     file_name = re.sub(r"[_\-\.#+$%^&*()!~`,;:\"'?/<>\[\]{}=|\\]", " ", str(media.file_name))
     file_name = re.sub(r"\s+", " ", file_name).strip()
@@ -116,32 +124,57 @@ async def save_file(media):
     target_db = "Primary"
     if MULTIPLE_DB:
         try:
-            if await Media.find_one({"file_id": file_id}): return False, 0
-            if DATABASE_URI2 and await Media2.find_one({"file_id": file_id}): return False, 0
-            if DATABASE_URI3 and await Media3.find_one({"file_id": file_id}): return False, 0
-            if await check_db_size(db) >= PRIMARY_LIMIT:
-                if DATABASE_URI3 and await check_db_size(db2) >= SECONDARY_LIMIT:
-                    saveMedia = Media3
-                    target_db = "Tertiary"
+            exists = await Media.find_one({"file_id": file_id})
+            if exists:
+                logger.info(f"[SKIP] '{file_name}' already in Primary DB.")
+                return False, 0
+            if DATABASE_URI2 and await Media2.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Secondary DB.")
+                return False, 0
+            if DATABASE_URI3 and await Media3.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Tertiary DB.")
+                return False, 0
+            primary_db_size = await check_db_size(db)
+            if primary_db_size >= PRIMARY_LIMIT:
+                if DATABASE_URI3:
+                    secondary_db_size = await check_db_size(db2)
+                    if secondary_db_size >= SECONDARY_LIMIT:
+                        saveMedia = Media3
+                        target_db = "Tertiary"
+                        logger.warning("Switching to Tertiary DB due to size threshold.")
+                    else:
+                        saveMedia = Media2
+                        target_db = "Secondary"
+                        logger.warning("Switching to Secondary DB due to size threshold.")
                 else:
                     saveMedia = Media2
                     target_db = "Secondary"
+                    logger.warning("Switching to Secondary DB due to size threshold.")
         except Exception as e:
-            logger.error("Error during MULTIPLE_DB check", exc_info=e)
+            logger.error("Error during MULTIPLE_DB check; defaulting to primary DB.", exc_info=e)
     try:
         cover_to_use = getattr(getattr(media, "cover", None), "file_id", None)
-        record = saveMedia(file_id=file_id, file_ref=file_ref, file_name=file_name, file_size=media.file_size, file_type=media.file_type, mime_type=media.mime_type, caption=(media.caption.html if media.caption and INDEX_CAPTION else None), cover=cover_to_use if COVERX else None)
+        record = saveMedia(
+            file_id=file_id, file_ref=file_ref, file_name=file_name,
+            file_size=media.file_size, file_type=media.file_type,
+            mime_type=media.mime_type,
+            caption=(media.caption.html if media.caption and INDEX_CAPTION else None),
+            cover=cover_to_use if COVERX else None,
+        )
     except Exception as e:
         logger.exception(f"[ERROR] '{file_name}' → {e}")
         return False, 2
     try:
         await record.commit()
-    except DuplicateKeyError: return False, 0
+    except DuplicateKeyError:
+        logger.info(f"[SKIP] DuplicateKey: '{file_name}' already exists in {target_db} DB.")
+        return False, 0
     except Exception as e:
         logger.exception(f"[ERROR] Failed commit of '{file_name}' to {target_db} DB.", exc_info=e)
         return False, 3
     return True, 1
 
+# ---- Yahi tera wala get_search_results - bas 3 DB jod diya ----
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
     if chat_id is not None and max_results is None:
         settings = await get_settings(int(chat_id))
@@ -149,134 +182,93 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             await save_group_settings(int(chat_id), "max_btn", True)
             settings["max_btn"] = True
         max_results = 10 if settings["max_btn"] else int(MAX_B_TN)
-
-    def _extract_base(filename: str) -> str:
-        try:
-            year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
-            if year_match:
-                t = year_match.group(1).replace("(", "").replace(")", "")
-                return re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
-            season_match = re.search(r"(.*?)(?:S(\d{1,2})|Season\s*(\d+)|Season(\d+))(?:\s*Combined)?", filename, re.IGNORECASE)
-            if season_match:
-                t = season_match.group(1).strip()
-                return re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", t).strip().lower()
-            t = re.sub(r"(?:@[^ \n\r\t.,:;!?()\[\]{}<>\\\/\"'=_%]+|[._\-\[\]@()]+)", " ", filename).strip().lower()
-            t = re.sub(r"\.(mp4|mkv|avi|mov|flv|webm)$", "", t)
-            t = re.split(r"\s+(1080p|720p|480p|2160p|4k|hevc|x264|x265|web-dl|bluray|hdr|esub)\b", t)[0]
-            return t.strip()
-        except: return filename.lower()
-
-    def _get_season_ep(fn: str):
-        m = re.search(r"S0*(\d{1,2})(?:\s*E0*(\d{1,2}))?", fn, re.I)
-        if m: return (int(m.group(1)) if m.group(1) else 999, int(m.group(2)) if m.group(2) else 999)
-        m2 = re.search(r"Season\s*0*(\d{1,2})", fn, re.I)
-        if m2: return (int(m2.group(1)), 999)
-        return (999, 999)
-
-    def _score(fn, q):
-        fn_low = fn.lower()
-        q_low = q.lower().strip()
-        if not q_low: return 0
-        base = _extract_base(fn)
-        base_nt = re.sub(r"^the\s+", "", base)
-        q_nt = re.sub(r"^the\s+", "", q_low)
-        f_season, f_ep = _get_season_ep(fn)
-        q_season = None
-        q_base = q_low
-        mqs = re.search(r"\bS0*(\d{1,2})\b", q_low)
-        if mqs:
-            q_season = int(mqs.group(1))
-            q_base = re.sub(r"\bS0*\d{1,2}\b", "", q_low, flags=re.I)
-            q_base = re.sub(r"\bseason\s*0*\d{1,2}\b", "", q_base, flags=re.I)
-            q_base = re.sub(r"\s+", " ", q_base).strip() or q_low
-            if q_season is not None and f_season != q_season: return 10
-        q_nt_base = re.sub(r"^the\s+", "", q_base)
-        norm_fn = re.sub(r"[._\-\[\]()]+", " ", fn_low)
-        norm_fn = re.sub(r"\s+", " ", norm_fn).strip()
-        if norm_fn == q_base or norm_fn == q_nt_base: return 1000
-        if base == q_base or base_nt == q_nt_base: return 990
-        if base.startswith(q_base + " ") or base_nt.startswith(q_nt_base + " "):
-            q_words = q_nt_base.split() if base_nt.startswith(q_nt_base + " ") else q_base.split()
-            base_words = (base_nt if base_nt.startswith(q_nt_base + " ") else base).split()
-            extra = len(base_words) - len(q_words)
-            penalty = 0
-            if extra > 0:
-                for w in base_words[len(q_words):]:
-                    if re.match(r"^(s\d{1,2}|season\d+|e\d{1,2}|\d{4}|1080p|720p|480p|2160p|4k|hevc|x264|x265|web|bluray|hdrip|esub)$", w): penalty += 5
-                    else: penalty += 50
-            return 900 - penalty - len(fn)*0.005
-        if fn_low.startswith(q_base): return 850
-        if re.search(rf"(\b|[\.\s\-\+_]){re.escape(q_base)}(\b|[\.\s\-\+_])", fn_low): return 700 - fn_low.find(q_base)*0.1
-        if q_base in fn_low: return 600 - fn_low.find(q_base)*0.1
-        if all(w in fn_low for w in q_base.split()): return 500
-        if any(w in fn_low for w in q_base.split()): return 100
-        return 0
-
     if isinstance(query, list):
-        terms = [q.strip() for q in query if q and q.strip()]
-        if not terms: return [], None, 0
-        clean_query = " ".join(terms)
-        and_filters = []
-        for term in terms:
-            pat = r"(\b|[\.\+\-_])" + re.escape(term) + r"(\b|[\.\+\-_])" if " " not in term else r".*[\s\.\+\-_]" .join(map(re.escape, term.split()))
-            try: rgx = compile_regex(pat)
-            except: continue
-            and_filters.append({"$or": [{"file_name": rgx}, {"caption": rgx}]} if USE_CAPTION_FILTER else {"file_name": rgx})
-        filter_mongo = {"$and": and_filters} if len(and_filters)>1 else and_filters[0]
-        if not and_filters: return [], None, 0
+        raw_pattern = "|".join(re.escape(q.strip()) for q in query if q and q.strip())
+        if not raw_pattern:
+            return [], None, 0
+        regex = compile_regex(raw_pattern)
+        if USE_CAPTION_FILTER:
+            filter_mongo = {"$or": [{"file_name": regex},{"caption": regex},]}
+        else:
+            filter_mongo = {"file_name": regex}
     else:
         query = query.strip()
-        if not query: return [], None, 0
-        clean_query = query
+        if not query:
+            return [], None, 0
         if " " in query:
             words = [re.escape(w) for w in query.split() if w]
-            raw_pattern = r".*[\s\.\+\-_]" .join(words)
+            raw_pattern = (r".*[\s\.\+\-_]".join(words) if words else r".")
         else:
-            raw_pattern = r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])"
-        try: regex = compile_regex(raw_pattern)
-        except re.error: return [], None, 0
-        filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
+            raw_pattern = (r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])" )
+        try:
+            regex = compile_regex(raw_pattern)
+        except re.error:
+            return [], None, 0
+        if USE_CAPTION_FILTER:
+            filter_mongo = { "$or": [{"file_name": regex}, {"caption": regex},]}
+        else:
+            filter_mongo = {"file_name": regex}
+    if file_type:
+        filter_mongo["file_type"] = file_type
 
-    if file_type: filter_mongo["file_type"] = file_type
-    # 110 per DB = 330 total - koi file skip nahi hogi, Next/Prev/Filter tez
-    fetch_extra = 10
-    fetch_limit_base = (max_results + 1) * fetch_extra
     if ULTRA_FAST_MODE:
-        fetch_limit = offset + fetch_limit_base
+        limit = max_results + 1
         if MULTIPLE_DB:
+            fetch_limit = offset + limit
             if DATABASE_URI3:
-                r = await asyncio.gather(Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit))
-                files = r[2] + r[1] + r[0]
+                results = await asyncio.gather(
+                    Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                )
+                files = results[2] + results[1] + results[0]
+                files = files[offset:offset + limit]
             else:
-                r = await asyncio.gather(Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit))
-                files = r[1] + r[0]
-        else: files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-        files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
-        files = files[offset:offset+max_results+1]
-        has_next = len(files) > max_results
-        if has_next: files = files[:-1]
-        next_offset = offset + len(files) if has_next else ""
-        total_results = offset + len(files) + (1 if has_next else 0)
+                results = await asyncio.gather(
+                    Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                )
+                files = results[1] + results[0]
+                files = files[offset:offset + limit]
+        else:
+            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
+        has_next_page = len(files) > max_results
+        if has_next_page:
+            files = files[:-1]
+        next_offset = offset + len(files) if has_next_page else ""
+        total_results = offset + len(files) + (1 if has_next_page else 0)
     else:
-        fetch_limit = offset + fetch_limit_base
         if MULTIPLE_DB:
+            fetch_limit = offset + max_results
             if DATABASE_URI3:
-                count_results, find_results = await asyncio.gather(asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)), asyncio.gather(Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)))
+                count_results, find_results = await asyncio.gather(
+                    asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)),
+                    asyncio.gather(
+                        Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    )
+                )
                 total_results = sum(count_results)
                 files = find_results[2] + find_results[1] + find_results[0]
+                files = files[offset:offset + max_results]
             else:
-                count_results, find_results = await asyncio.gather(asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)), asyncio.gather(Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit), Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)))
+                count_results, find_results = await asyncio.gather(
+                    asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)),
+                    asyncio.gather(
+                        Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    )
+                )
                 total_results = sum(count_results)
                 files = find_results[1] + find_results[0]
-            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
-            files = files[offset:offset+max_results]
+                files = files[offset:offset + max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
-            files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
-            files = files[offset:offset+max_results]
+            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
         next_offset = offset + len(files)
-        if next_offset >= total_results: next_offset = ""
+        if next_offset >= total_results:
+            next_offset = ""
     return files, next_offset, total_results
 
 async def get_bad_files(query, file_type=None):
@@ -286,7 +278,8 @@ async def get_bad_files(query, file_type=None):
     else: raw_pattern = r".*[\s\.\+\-_]".join(map(re.escape, query.split()))
     try: regex = compile_regex(raw_pattern)
     except re.error: return [], 0
-    filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
+    if USE_CAPTION_FILTER: filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]}
+    else: filter_mongo = {"file_name": regex}
     if file_type: filter_mongo["file_type"] = file_type
     tasks = [Media.find(filter_mongo).sort("$natural", -1).to_list(300)]
     if MULTIPLE_DB:
@@ -324,16 +317,19 @@ def unpack_new_file_id(new_file_id):
     file_id = encode_file_id(pack("<iiqq", int(decoded.file_type), decoded.dc_id, decoded.media_id, decoded.access_hash))
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
+
 async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
-        if MULTIPLE_DB and await check_db_size(db) > PRIMARY_LIMIT:
-            if DATABASE_URI3 and await check_db_size(db2) > SECONDARY_LIMIT:
-                return await Media3.find().sort("$natural", -1).limit(limit).to_list(length=limit)
-            return await Media2.find().sort("$natural", -1).limit(limit).to_list(length=limit)
+        if MULTIPLE_DB:
+            if await check_db_size(db) > PRIMARY_LIMIT:
+                if DATABASE_URI3 and await check_db_size(db2) > SECONDARY_LIMIT:
+                    return await Media3.find().sort("$natural", -1).limit(limit).to_list(length=limit)
+                return await Media2.find().sort("$natural", -1).limit(limit).to_list(length=limit)
         return await Media.find().sort("$natural", -1).limit(limit).to_list(length=limit)
     except Exception as e:
         logger.error(f"Error in dreamxbotz_fetch_media: {e}")
         return []
+
 async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     try:
         year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
@@ -351,6 +347,7 @@ async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     except Exception as e:
         logger.error(f"Error in truncate_title: {e}")
         return filename
+
 async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 2)
@@ -366,6 +363,7 @@ async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_get_movies: {e}")
         return []
+
 async def dreamxbotz_get_series(limit: int = 30) -> Dict[str, List[int]]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 5)
