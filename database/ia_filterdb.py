@@ -187,20 +187,49 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         except:
             return filename.lower()
 
+    def _get_season_ep(fn: str):
+        m = re.search(r"S0*(\d{1,2})(?:\s*E0*(\d{1,2}))?", fn, re.I)
+        if m:
+            s = int(m.group(1)) if m.group(1) else 999
+            e = int(m.group(2)) if m.group(2) else 999
+            return (s, e)
+        m2 = re.search(r"Season\s*0*(\d{1,2})", fn, re.I)
+        if m2:
+            return (int(m2.group(1)), 999)
+        return (999, 999)
+
     def _score(fn, q):
         fn_low = fn.lower()
         q_low = q.lower().strip()
         if not q_low:
             return 0
+        # Season parse for query like "from s03" or "dark s02"
+        q_season = None
+        q_base = q_low
+        mqs = re.search(r"\bS0*(\d{1,2})\b", q_low)
+        if mqs:
+            q_season = int(mqs.group(1))
+            q_base = re.sub(r"\bS0*\d{1,2}\b", "", q_low, flags=re.I)
+            q_base = re.sub(r"\bseason\s*0*\d{1,2}\b", "", q_base, flags=re.I)
+            q_base = re.sub(r"\s+", " ", q_base).strip()
+            if not q_base:
+                q_base = q_low
+
+        base = _extract_base(fn)
+        f_season, f_ep = _get_season_ep(fn)
+
+        # If query has season filter, mismatch goes to bottom
+        if q_season is not None and f_season != q_season:
+            return 10  # bahut neeche
+
         norm_fn = re.sub(r"[._\-\[\]()]+", " ", fn_low)
         norm_fn = re.sub(r"\s+", " ", norm_fn).strip()
-        base = _extract_base(fn)
-        if norm_fn == q_low:
+        if q_base and norm_fn == q_base:
             return 1000
-        if base == q_low:
+        if q_base and base == q_base:
             return 990
-        if base.startswith(q_low + " "):
-            q_words = q_low.split()
+        if q_base and base.startswith(q_base + " "):
+            q_words = q_base.split()
             base_words = base.split()
             extra = len(base_words) - len(q_words)
             if extra < 0:
@@ -215,41 +244,66 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                     else:
                         penalty += 50
             return 900 - penalty - len(fn)*0.005
-        if fn_low.startswith(q_low):
+        if q_base and fn_low.startswith(q_base):
             return 850
-        if re.search(rf"(\b|[\.\s\-\+_]){re.escape(q_low)}(\b|[\.\s\-\+_])", fn_low):
-            pos = fn_low.find(q_low)
+        if q_base and re.search(rf"(\b|[\.\s\-\+_]){re.escape(q_base)}(\b|[\.\s\-\+_])", fn_low):
+            pos = fn_low.find(q_base)
             return 700 - pos*0.1
-        if q_low in fn_low:
-            return 600 - fn_low.find(q_low)*0.1
-        q_words = q_low.split()
-        if all(w in fn_low for w in q_words):
-            return 500
-        if any(w in fn_low for w in q_words):
-            return 100
+        if q_base and q_base in fn_low:
+            return 600 - fn_low.find(q_base)*0.1
+        if q_base:
+            q_words = q_base.split()
+            if all(w in fn_low for w in q_words):
+                return 500
+            if any(w in fn_low for w in q_words):
+                return 100
         return 0
 
+    # Handle list query with AND logic
     if isinstance(query, list):
-        raw_pattern = "|".join(re.escape(q.strip()) for q in query if q and q.strip())
-        if not raw_pattern: return [], None, 0
-        regex = compile_regex(raw_pattern)
-        clean_query = " ".join(query)
-        filter_mongo = {"$or": [{"file_name": regex},{"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
+        terms = [q.strip() for q in query if q and q.strip()]
+        if not terms:
+            return [], None, 0
+        clean_query = " ".join(terms)
+        and_filters = []
+        for term in terms:
+            if " " in term:
+                words = [re.escape(w) for w in term.split() if w]
+                pat = r".*[\s\.\+\-_]" .join(words)
+            else:
+                pat = r"(\b|[\.\+\-_])" + re.escape(term) + r"(\b|[\.\+\-_])"
+            try:
+                rgx = compile_regex(pat)
+            except re.error:
+                continue
+            if USE_CAPTION_FILTER:
+                and_filters.append({"$or": [{"file_name": rgx}, {"caption": rgx}]})
+            else:
+                and_filters.append({"file_name": rgx})
+        if not and_filters:
+            return [], None, 0
+        filter_mongo = {"$and": and_filters} if len(and_filters) > 1 else and_filters[0]
     else:
         query = query.strip()
-        if not query: return [], None, 0
+        if not query:
+            return [], None, 0
         clean_query = query
         if " " in query:
             words = [re.escape(w) for w in query.split() if w]
             raw_pattern = r".*[\s\.\+\-_]" .join(words)
         else:
             raw_pattern = r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])"
-        try: regex = compile_regex(raw_pattern)
-        except re.error: return [], None, 0
+        try:
+            regex = compile_regex(raw_pattern)
+        except re.error:
+            return [], None, 0
         filter_mongo = {"$or": [{"file_name": regex},{"caption": regex}]} if USE_CAPTION_FILTER else {"file_name": regex}
 
-    if file_type: filter_mongo["file_type"] = file_type
-    fetch_extra = 2
+    if file_type:
+        filter_mongo["file_type"] = file_type
+
+    # FAST but Accurate - 55 per DB, total ~165, then exact sort
+    fetch_extra = 5
     limit = (max_results + 1) * fetch_extra
     if ULTRA_FAST_MODE:
         fetch_limit = offset + limit
@@ -269,10 +323,11 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 files = r[1] + r[0]
         else:
             files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-        files.sort(key=lambda f: _score(getattr(f, 'file_name',''), clean_query), reverse=True)
+        files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
         files = files[offset:offset+max_results+1]
         has_next = len(files) > max_results
-        if has_next: files = files[:-1]
+        if has_next:
+            files = files[:-1]
         next_offset = offset + len(files) if has_next else ""
         total_results = offset + len(files) + (1 if has_next else 0)
     else:
@@ -299,15 +354,16 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 )
                 total_results = sum(count_results)
                 files = find_results[1] + find_results[0]
-            files.sort(key=lambda f: _score(getattr(f, 'file_name',''), clean_query), reverse=True)
+            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
             files = files[offset:offset+max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
             files = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-            files.sort(key=lambda f: _score(getattr(f, 'file_name',''), clean_query), reverse=True)
+            files.sort(key=lambda f: (-_score(getattr(f, 'file_name',''), clean_query), _get_season_ep(getattr(f, 'file_name',''))))
             files = files[offset:offset+max_results]
         next_offset = offset + len(files)
-        if next_offset >= total_results: next_offset = ""
+        if next_offset >= total_results:
+            next_offset = ""
     return files, next_offset, total_results
 
 async def get_bad_files(query, file_type=None):
@@ -366,6 +422,7 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_fetch_media: {e}")
         return []
+
 async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     try:
         year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
@@ -383,6 +440,7 @@ async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     except Exception as e:
         logger.error(f"Error in truncate_title: {e}")
         return filename
+
 async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 2)
@@ -398,6 +456,7 @@ async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_get_movies: {e}")
         return []
+
 async def dreamxbotz_get_series(limit: int = 30) -> Dict[str, List[int]]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 5)
