@@ -1,9 +1,9 @@
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors.exceptions.bad_request_400 import MessageTooLong, PeerIdInvalid
-from info import ADMINS, MULTIPLE_DB, DATABASE_URI3, LOG_CHANNEL, OWNER_LNK, MELCOW_PHOTO
+from info import ADMINS, MULTIPLE_DB, DATABASE_URI3, DATABASE_URI4, LOG_CHANNEL, OWNER_LNK, MELCOW_PHOTO
 from database.users_chats_db import db, db2
-from database.ia_filterdb import Media, Media2, Media3, db as db_stats, db2 as db2_stats, db3 as db3_stats, client, client2, client3
+from database.ia_filterdb import Media, Media2, Media3, Media4, db as db_stats, db2 as db2_stats, db3 as db3_stats, db4 as db4_stats, client, client2, client3, client4
 from utils import get_size, temp, get_settings, get_readable_time
 from Script import script
 from pyrogram.errors import ChatAdminRequired
@@ -224,13 +224,33 @@ async def get_stats(bot, message):
             current_db3_size = 0
             db3_size = 0
             free3 = DB_SIZE
+
+        if DATABASE_URI4:
+            file4 = await Media4.count_documents()
+            db4stats = await db4_stats.command("dbStats")
+            current_db4_size = db4stats['dataSize'] + db4stats['indexSize']
+            dbs4 = await client4.list_database_names()
+            db4_size = 0
+            for db_name in dbs4:
+                if db_name in ["admin", "local"]:
+                    continue
+                stats = await client4[db_name].command("dbStats")
+                db4_size += stats['dataSize'] + stats['indexSize']
+            free4 = DB_SIZE - db4_size
+            if free4 < 0: free4 = 0
+        else:
+            file4 = 0
+            current_db4_size = 0
+            db4_size = 0
+            free4 = DB_SIZE
         
         await msg.edit(script.MULTI_STATUS_TXT.format(
             total_users, totl_chats, premium, 
             file1, get_size(current_db_size), get_size(db_size), get_size(free),
             file2, get_size(current_db2_size), get_size(db2_size), get_size(free2), 
             file3, get_size(current_db3_size), get_size(db3_size), get_size(free3),
-            uptime, ram, cpu, (int(file1) + int(file2) + int(file3))
+            file4, get_size(current_db4_size), get_size(db4_size), get_size(free4),
+            uptime, ram, cpu, (int(file1) + int(file2) + int(file3) + int(file4))
             ))
     except Exception as e:
        print(f"Error In stats :- {e}")        
