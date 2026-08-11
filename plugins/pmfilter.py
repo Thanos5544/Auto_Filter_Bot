@@ -4,7 +4,7 @@ from fuzzywuzzy import process
 from dreamxbotz.util.file_properties import get_name, get_hash
 from urllib.parse import quote_plus
 import logging
-from database.ia_filterdb import Media, Media2, Media3, get_file_details, get_search_results, get_bad_files
+from database.ia_filterdb import Media, Media2, Media3, Media4, get_file_details, get_search_results, get_bad_files
 from database.config_db import mdb
 from pyrogram.errors import MessageIdInvalid, UserIsBlocked, MessageNotModified, PeerIdInvalid
 from pyrogram import Client, filters, enums
@@ -928,11 +928,12 @@ async def cb_handler(client: Client, query: CallbackQuery):
             f_caption = f"{files.file_name}"
         await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{files.file_id}")
 
-    elif query.data.startswith("autofilter_delete"):
+        elif query.data.startswith("autofilter_delete"):
         await Media.collection.drop()
         if MULTIPLE_DB:    
             await Media2.collection.drop()
             await Media3.collection.drop()
+            await Media4.collection.drop()
         await query.answer("Eᴠᴇʀʏᴛʜɪɴɢ's Gᴏɴᴇ")
         await query.message.edit('ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ᴀʟʟ ɪɴᴅᴇxᴇᴅ ꜰɪʟᴇꜱ ✅')
 
