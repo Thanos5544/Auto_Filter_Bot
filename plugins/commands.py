@@ -557,7 +557,7 @@ async def save_file_handler(bot, message):
 
 @Client.on_message(filters.command('delete') & filters.user(ADMINS))
 async def delete(bot, message):
-    """Delete file from database - Supports 3 DBs"""
+    """Delete file from database - Supports 4 DBs"""
     reply = message.reply_to_message
     if reply and reply.media:
         msg = await message.reply("Pʀᴏᴄᴇssɪɴɢ...⏳", quote=True)
@@ -575,18 +575,18 @@ async def delete(bot, message):
     
     file_id, file_ref = unpack_new_file_id(media.file_id)
     
-    # Try to delete by file_id from any of 3 DBs
-    for MediaCls in (Media, Media2, Media3):
+    # Try to delete by file_id from any of 4 DBs
+    for MediaCls in (Media, Media2, Media3, Media4):
         if await MediaCls.count_documents({'file_id': file_id}):
             result = await MediaCls.collection.delete_one({'_id': file_id})
             if result.deleted_count:
                 await msg.edit('Fɪʟᴇ ɪs sᴜᴄᴄᴇssғᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ғʀᴏᴍ ᴅᴀᴛᴀʙᴀsᴇ ✅')
                 return
 
-    # If not found by file_id, try by file_name + size + mime_type in all 3 DBs
+    # If not found by file_id, try by file_name + size + mime_type in all 4 DBs
     file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
     
-    for MediaCls in (Media, Media2, Media3):
+    for MediaCls in (Media, Media2, Media3, Media4):
         result = await MediaCls.collection.delete_many({
             'file_name': file_name,
             'file_size': media.file_size,
@@ -597,7 +597,7 @@ async def delete(bot, message):
             return
 
     # Try with original file_name
-    for MediaCls in (Media, Media2, Media3):
+    for MediaCls in (Media, Media2, Media3, Media4):
         result = await MediaCls.collection.delete_many({
             'file_name': media.file_name,
             'file_size': media.file_size,
