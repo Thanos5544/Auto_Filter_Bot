@@ -7,10 +7,9 @@ import asyncio
 from datetime import date, datetime
 from pathlib import Path
 import pytz
-from aiohttp import web
-from database.ia_filterdb import Media, Media2, Media3
+from database.ia_filterdb import Media, Media2, Media3, Media4
 from database.users_chats_db import db
-from info import MULTIPLE_DB, DATABASE_URI3, ON_HEROKU, LOG_STR, LOG_CHANNEL, PORT
+from info import MULTIPLE_DB, DATABASE_URI3, DATABASE_URI4, ON_HEROKU, LOG_STR, LOG_CHANNEL, PORT
 from utils import temp
 from Script import script
 from plugins import web_server, check_expired_premium, keep_alive
@@ -63,11 +62,14 @@ async def dreamxbotz_start():
     b_users, b_chats = await db.get_banned()
     temp.BANNED_USERS = b_users
     temp.BANNED_CHATS = b_chats
-    await Media.ensure_indexes()
-    if MULTIPLE_DB:
+        await Media.ensure_indexes()
+        if MULTIPLE_DB:
         await Media2.ensure_indexes()
         await Media3.ensure_indexes()
-        if DATABASE_URI3:
+        await Media4.ensure_indexes()
+        if DATABASE_URI4:
+            logging.info("Multiple Database Mode On. Now Files Will Be Save In 2nd, 3rd & 4th DB If 1st DB Is Full")
+        elif DATABASE_URI3:
             logging.info("Multiple Database Mode On. Now Files Will Be Save In 2nd & 3rd DB If 1st DB Is Full")
         else:
             logging.info("Multiple Database Mode On. Now Files Will Be Save In Second DB If First DB Is Full")
