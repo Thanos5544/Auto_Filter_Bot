@@ -271,6 +271,7 @@ Bot_cmds = {
 if not MULTIPLE_DB:
     DATABASE_URI2 = DATABASE_URI
     DATABASE_URI3 = DATABASE_URI
+    DATABASE_URI4 = DATABASE_URI
 
 # ============================
 # Logs Configuration
