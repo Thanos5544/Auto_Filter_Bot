@@ -62,8 +62,8 @@ async def dreamxbotz_start():
     b_users, b_chats = await db.get_banned()
     temp.BANNED_USERS = b_users
     temp.BANNED_CHATS = b_chats
-        await Media.ensure_indexes()
-        if MULTIPLE_DB:
+    await Media.ensure_indexes()
+    if MULTIPLE_DB:
         await Media2.ensure_indexes()
         await Media3.ensure_indexes()
         await Media4.ensure_indexes()
