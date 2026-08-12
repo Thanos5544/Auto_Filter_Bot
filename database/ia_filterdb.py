@@ -212,6 +212,25 @@ async def save_file(media):
         return False, 3
     return True, 1
 
+def sort_by_relevance(files, query):
+    """Jo file query se sabse zyada match kare wo pehle aaye"""
+    if not query or isinstance(query, list):
+        return files
+    q = re.sub(r"[\._\-\+]", " ", query.strip().lower())
+    q = re.sub(r"\s+", " ", q).strip()
+    if not q:
+        return files
+    def score(f):
+        name = re.sub(r"[\._\-\+]", " ", (getattr(f, "file_name", "") or "").lower())
+        name = re.sub(r"\s+", " ", name).strip()
+        if name.startswith(q):
+            return (0, len(name))
+        pos = name.find(q)
+        if pos != -1:
+            return (1, pos)
+        return (2, 0)
+    return sorted(files, key=score)
+
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
     if chat_id is not None and max_results is None:
         settings = await get_settings(int(chat_id))
@@ -223,11 +242,7 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         raw_pattern = "|".join(re.escape(q.strip()) for q in query if q and q.strip())
         if not raw_pattern:
             return [], None, 0
-        regex = compile_regex(raw_pattern)
-        if USE_CAPTION_FILTER:
-            filter_mongo = {"$or": [{"file_name": regex},{"caption": regex},]}
-        else:
-            filter_mongo = {"file_name": regex}
+        query_for_sort = None
     else:
         query = query.strip()
         if not query:
@@ -236,58 +251,46 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             words = [re.escape(w) for w in query.split() if w]
             raw_pattern = (r".*[\s\.\+\-_]".join(words) if words else r".")
         else:
-            raw_pattern = (r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])" )
-        try:
-            regex = compile_regex(raw_pattern)
-        except re.error:
-            return [], None, 0
-        if USE_CAPTION_FILTER:
-            filter_mongo = { "$or": [{"file_name": regex}, {"caption": regex},]}
-        else:
-            filter_mongo = {"file_name": regex}
+            raw_pattern = (r"(\b|[\.\+\-_])" + re.escape(query) + r"(\b|[\.\+\-_])")
+        query_for_sort = query
+    try:
+        regex = compile_regex(raw_pattern)
+    except re.error:
+        return [], None, 0
+    # ---- CAPTION HAR SEARCH PE SCAN (purane jaisa) ----
+    if USE_CAPTION_FILTER:
+        filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]}
+    else:
+        filter_mongo = {"file_name": regex}
     if file_type:
         filter_mongo["file_type"] = file_type
 
-    if ULTRA_FAST_MODE:
-        limit = max_results + 1
-        if MULTIPLE_DB:
-            fetch_limit = offset + limit
-            results = await asyncio.gather(*[
-                MC.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-                for MC in MEDIA_CLASSES
-            ])
-            files = []
-            for r in reversed(results):
-                files += r
-            files = files[offset:offset + limit]
-        else:
-            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
-        has_next_page = len(files) > max_results
-        if has_next_page:
-            files = files[:-1]
-        next_offset = offset + len(files) if has_next_page else ""
-        total_results = offset + len(files) + (1 if has_next_page else 0)
+    limit = max_results + 1
+    fetch_limit = offset + limit
+
+    if MULTIPLE_DB:
+        results = await asyncio.gather(*[
+            MC.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
+            for MC in MEDIA_CLASSES
+        ])
+        # ---- DEDUPE - same file do baar nahi dikhegi ----
+        merged = {}
+        for r in reversed(results):
+            for f in r:
+                merged[f.file_id] = f
+        files_all = list(merged.values())
     else:
-        if MULTIPLE_DB:
-            fetch_limit = offset + max_results
-            count_results, find_results = await asyncio.gather(
-                asyncio.gather(*[MC.count_documents(filter_mongo) for MC in MEDIA_CLASSES]),
-                asyncio.gather(*[
-                    MC.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-                    for MC in MEDIA_CLASSES
-                ])
-            )
-            total_results = sum(count_results)
-            files = []
-            for r in reversed(find_results):
-                files += r
-            files = files[offset:offset + max_results]
-        else:
-            total_results = await Media.count_documents(filter_mongo)
-            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
-        next_offset = offset + len(files)
-        if next_offset >= total_results:
-            next_offset = ""
+        files_all = await Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
+
+    # ---- RELEVANCE - sahi movie upar ----
+    files_all = sort_by_relevance(files_all, query_for_sort)
+
+    files = files_all[offset:offset + limit]
+    has_next_page = len(files) > max_results
+    if has_next_page:
+        files = files[:-1]
+    next_offset = offset + len(files) if has_next_page else ""
+    total_results = offset + len(files) + (1 if has_next_page else 0)
     return files, next_offset, total_results
 
 async def get_bad_files(query, file_type=None):
