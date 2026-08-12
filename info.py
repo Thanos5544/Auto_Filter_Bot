@@ -86,6 +86,7 @@ COLLECTION_NAME = environ.get('COLLECTION_NAME', 'Mhakalx') # Collection name (d
 MULTIPLE_DB = is_enabled(os.environ.get('MULTIPLE_DB', "True"), True) # Type True For Turn On MULTIPLE DB FUNTION 
 DATABASE_URI2 = environ.get('DATABASE_URI2', "")  # MongoDB URI for the second database (if MULTIPLE_DB is True)
 DATABASE_URI3 = environ.get('DATABASE_URI3', "")  # MongoDB URI for the third database
+DATABASE_URI4 = environ.get('DATABASE_URI4', "")  # MongoDB URI for the fourth database
 # ============================
 # Movie Notification & Update Settings
 # ============================
@@ -270,6 +271,7 @@ Bot_cmds = {
 if not MULTIPLE_DB:
     DATABASE_URI2 = DATABASE_URI
     DATABASE_URI3 = DATABASE_URI
+    DATABASE_URI4 = DATABASE_URI
 
 # ============================
 # Logs Configuration
