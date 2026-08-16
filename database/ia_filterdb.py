@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 # ---------------------------------------------------------
 
-# ---- LIMITS - 407 -> 2nd , 480 -> 3rd , 480 -> 4th ----
+# ---- LIMITS - 407 -> 2nd , 480 -> 3rd , 480 -> 4th , 4th 512 tak ----
 PRIMARY_LIMIT = 407
 SECONDARY_LIMIT = 480
 TERTIARY_LIMIT = 480
@@ -124,16 +124,6 @@ class Media4(Document):
         indexes = ("$file_name",)
         collection_name = COLLECTION_NAME
 
-# ---- SAARE ACTIVE DBs KI LIST (search/duplicate check ke liye) ----
-MEDIA_CLASSES = [Media]
-if MULTIPLE_DB:
-    if DATABASE_URI2:
-        MEDIA_CLASSES.append(Media2)
-    if DATABASE_URI3:
-        MEDIA_CLASSES.append(Media3)
-    if DATABASE_URI4:
-        MEDIA_CLASSES.append(Media4)
-
 async def check_db_size(db_obj):
     try:
         key = id(db_obj)
@@ -159,21 +149,25 @@ async def save_file(media):
     target_db = "Primary"
     if MULTIPLE_DB:
         try:
-            # ---- DUPLICATE SAARE DB ME CHECK ----
-            for MC in MEDIA_CLASSES:
-                if await MC.find_one({"file_id": file_id}):
-                    logger.info(f"[SKIP] '{file_name}' already exists in DB.")
-                    return False, 0
+            # ---- DUPLICATE CHAARO DB ME CHECK ----
+            if await Media.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Primary DB.")
+                return False, 0
+            if DATABASE_URI2 and await Media2.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Secondary DB.")
+                return False, 0
+            if DATABASE_URI3 and await Media3.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Tertiary DB.")
+                return False, 0
+            if DATABASE_URI4 and await Media4.find_one({"file_id": file_id}):
+                logger.info(f"[SKIP] '{file_name}' already in Fourth DB.")
+                return False, 0
 
             primary_db_size = await check_db_size(db)
             if primary_db_size >= PRIMARY_LIMIT:
-                saveMedia = Media2
-                target_db = "Secondary"
                 if DATABASE_URI3:
                     secondary_db_size = await check_db_size(db2)
                     if secondary_db_size >= SECONDARY_LIMIT:
-                        saveMedia = Media3
-                        target_db = "Tertiary"
                         if DATABASE_URI4:
                             tertiary_db_size = await check_db_size(db3)
                             if tertiary_db_size >= TERTIARY_LIMIT:
@@ -181,12 +175,20 @@ async def save_file(media):
                                 target_db = "Fourth"
                                 logger.warning("Switching to Fourth DB due to size threshold.")
                             else:
+                                saveMedia = Media3
+                                target_db = "Tertiary"
                                 logger.warning("Switching to Tertiary DB due to size threshold.")
                         else:
+                            saveMedia = Media3
+                            target_db = "Tertiary"
                             logger.warning("Switching to Tertiary DB due to size threshold.")
                     else:
+                        saveMedia = Media2
+                        target_db = "Secondary"
                         logger.warning("Switching to Secondary DB due to size threshold.")
                 else:
+                    saveMedia = Media2
+                    target_db = "Secondary"
                     logger.warning("Switching to Secondary DB due to size threshold.")
         except Exception as e:
             logger.error("Error during MULTIPLE_DB check; defaulting to primary DB.", exc_info=e)
@@ -212,6 +214,7 @@ async def save_file(media):
         return False, 3
     return True, 1
 
+# ---- WAHI TERA WALA get_search_results - BAS 4 DB JOD DIYA ----
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
     if chat_id is not None and max_results is None:
         settings = await get_settings(int(chat_id))
@@ -252,14 +255,30 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         limit = max_results + 1
         if MULTIPLE_DB:
             fetch_limit = offset + limit
-            results = await asyncio.gather(*[
-                MC.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-                for MC in MEDIA_CLASSES
-            ])
-            files = []
-            for r in reversed(results):
-                files += r
-            files = files[offset:offset + limit]
+            if DATABASE_URI4 and DATABASE_URI3:
+                results = await asyncio.gather(
+                    Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media4.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                )
+                files = results[3] + results[2] + results[1] + results[0]
+                files = files[offset:offset + limit]
+            elif DATABASE_URI3:
+                results = await asyncio.gather(
+                    Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                )
+                files = results[2] + results[1] + results[0]
+                files = files[offset:offset + limit]
+            else:
+                results = await asyncio.gather(
+                    Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                )
+                files = results[1] + results[0]
+                files = files[offset:offset + limit]
         else:
             files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
         has_next_page = len(files) > max_results
@@ -270,18 +289,42 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     else:
         if MULTIPLE_DB:
             fetch_limit = offset + max_results
-            count_results, find_results = await asyncio.gather(
-                asyncio.gather(*[MC.count_documents(filter_mongo) for MC in MEDIA_CLASSES]),
-                asyncio.gather(*[
-                    MC.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit)
-                    for MC in MEDIA_CLASSES
-                ])
-            )
-            total_results = sum(count_results)
-            files = []
-            for r in reversed(find_results):
-                files += r
-            files = files[offset:offset + max_results]
+            if DATABASE_URI4 and DATABASE_URI3:
+                count_results, find_results = await asyncio.gather(
+                    asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo), Media4.count_documents(filter_mongo)),
+                    asyncio.gather(
+                        Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media4.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    )
+                )
+                total_results = sum(count_results)
+                files = find_results[3] + find_results[2] + find_results[1] + find_results[0]
+                files = files[offset:offset + max_results]
+            elif DATABASE_URI3:
+                count_results, find_results = await asyncio.gather(
+                    asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)),
+                    asyncio.gather(
+                        Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    )
+                )
+                total_results = sum(count_results)
+                files = find_results[2] + find_results[1] + find_results[0]
+                files = files[offset:offset + max_results]
+            else:
+                count_results, find_results = await asyncio.gather(
+                    asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)),
+                    asyncio.gather(
+                        Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                        Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    )
+                )
+                total_results = sum(count_results)
+                files = find_results[1] + find_results[0]
+                files = files[offset:offset + max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
             files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
@@ -300,9 +343,12 @@ async def get_bad_files(query, file_type=None):
     if USE_CAPTION_FILTER: filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]}
     else: filter_mongo = {"file_name": regex}
     if file_type: filter_mongo["file_type"] = file_type
-    results = await asyncio.gather(*[
-        MC.find(filter_mongo).sort("$natural", -1).to_list(300) for MC in MEDIA_CLASSES
-    ])
+    tasks = [Media.find(filter_mongo).sort("$natural", -1).to_list(300)]
+    if MULTIPLE_DB:
+        tasks.append(Media2.find(filter_mongo).sort("$natural", -1).to_list(300))
+        if DATABASE_URI3: tasks.append(Media3.find(filter_mongo).sort("$natural", -1).to_list(300))
+        if DATABASE_URI4: tasks.append(Media4.find(filter_mongo).sort("$natural", -1).to_list(300))
+    results = await asyncio.gather(*tasks)
     files = []
     for r in reversed(results):
         files += r
@@ -310,9 +356,12 @@ async def get_bad_files(query, file_type=None):
 
 async def get_file_details(query):
     filter = {"file_id": query}
-    results = await asyncio.gather(*[
-        MC.find(filter).to_list(length=1) for MC in MEDIA_CLASSES
-    ])
+    tasks = [Media.find(filter).to_list(length=1)]
+    if MULTIPLE_DB:
+        tasks.append(Media2.find(filter).to_list(length=1))
+        if DATABASE_URI3: tasks.append(Media3.find(filter).to_list(length=1))
+        if DATABASE_URI4: tasks.append(Media4.find(filter).to_list(length=1))
+    results = await asyncio.gather(*tasks)
     for f in results:
         if f: return f
     return []
@@ -332,6 +381,7 @@ def unpack_new_file_id(new_file_id):
     file_id = encode_file_id(pack("<iiqq", int(decoded.file_type), decoded.dc_id, decoded.media_id, decoded.access_hash))
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
+
 async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
         if MULTIPLE_DB:
@@ -345,6 +395,7 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_fetch_media: {e}")
         return []
+
 async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     try:
         year_match = re.search(r"^(.*?(\d{4}|\(\d{4}\)))", filename, re.IGNORECASE)
@@ -362,6 +413,7 @@ async def dreamxbotz_clean_title(filename: str, is_series: bool = False) -> str:
     except Exception as e:
         logger.error(f"Error in truncate_title: {e}")
         return filename
+
 async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 2)
@@ -377,6 +429,7 @@ async def dreamxbotz_get_movies(limit: int = 20) -> List[str]:
     except Exception as e:
         logger.error(f"Error in dreamxbotz_get_movies: {e}")
         return []
+
 async def dreamxbotz_get_series(limit: int = 30) -> Dict[str, List[int]]:
     try:
         cursor = await dreamxbotz_fetch_media(limit * 5)
