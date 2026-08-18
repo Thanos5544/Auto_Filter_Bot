@@ -44,7 +44,6 @@ async def watch_handler(request: web.Request):
         logging.critical(e.with_traceback(None))
         raise web.HTTPInternalServerError(text=str(e))
 
-# NEW - DOWNLOAD ROUTE
 @routes.get(r"/dl/{path:\S+}", allow_head=True)
 async def download_handler(request: web.Request):
     try:
@@ -157,8 +156,11 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
 
     mime_type = file_id.mime_type
     file_name = file_id.file_name
-    # FIXED - download pe attachment, stream pe inline
     disposition = "attachment" if is_download else "inline"
+
+    # FIX for Chrome - mkv H264 ko mp4 bol ke bhej taaki chrome pe bhi chale
+    if file_name and file_name.lower().endswith(".mkv"):
+        mime_type = "video/mp4"
 
     if mime_type:
         if not file_name:
@@ -169,6 +171,9 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
     else:
         if file_name:
             mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+            # mkv wale ka mime upar already video/mp4 kar diya hai
+            if file_name.lower().endswith(".mkv"):
+                mime_type = "video/mp4"
         else:
             mime_type = "application/octet-stream"
             file_name = f"{secrets.token_hex(2)}.unknown"
