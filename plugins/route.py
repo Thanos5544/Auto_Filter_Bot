@@ -5,7 +5,7 @@ import mimetypes
 import traceback
 from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine
-from dreamxbotz.bot import multi_clients, work_loads, FileStream
+from dreamxbotz.bot import multi_clients, work_loads, dreamxbotz
 from dreamxbotz.config import Telegram, Server
 from dreamxbotz.server.exceptions import FIleNotFound, InvalidHash
 from dreamxbotz import utils, StartTime, __version__
