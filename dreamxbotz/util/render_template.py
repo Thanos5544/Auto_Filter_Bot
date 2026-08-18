@@ -1,9 +1,9 @@
 import aiohttp
 import jinja2
 import urllib.parse
-from FileStream.config import Telegram, Server
-from FileStream.utils.database import Database
-from FileStream.utils.human_readable import humanbytes
+from dreamxbotz.config import Telegram, Server
+from dreamxbotz.utils.database import Database
+from dreamxbotz.utils.human_readable import humanbytes
 db = Database(Telegram.DATABASE_URL, Telegram.SESSION_NAME)
 
 async def render_page(db_id):
