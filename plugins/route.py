@@ -9,7 +9,7 @@ from dreamxbotz.Bot import multi_clients, work_loads
 from dreamxbotz.server.exceptions import FIleNotFound, InvalidHash
 from dreamxbotz.util.custom_dl import ByteStreamer
 from dreamxbotz.util.render_template import render_page
-from info import MULTI_CLIENT
+import info
 
 
 routes = web.RouteTableDef()
@@ -82,7 +82,7 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
     
-    if MULTI_CLIENT:
+    if info.MULTI_CLIENT:
         logging.info(f"Client {index} is now serving {request.remote}")
 
     if faster_client in class_cache:
@@ -130,7 +130,6 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
 
     mime_type = file_id.mime_type
     file_name = file_id.file_name
-    disposition = "attachment"
 
     if mime_type:
         if not file_name:
