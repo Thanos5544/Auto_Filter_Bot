@@ -9,7 +9,8 @@ from dreamxbotz.Bot import multi_clients, work_loads
 from dreamxbotz.server.exceptions import FIleNotFound, InvalidHash
 from dreamxbotz.util.custom_dl import ByteStreamer
 from dreamxbotz.util.render_template import render_page
-import info
+from info import MULTI_CLIENT
+
 
 routes = web.RouteTableDef()
 
@@ -43,33 +44,6 @@ async def watch_handler(request: web.Request):
         logging.critical(e.with_traceback(None))
         raise web.HTTPInternalServerError(text=str(e))
 
-@routes.get(r"/dl/{path:\S+}", allow_head=True)
-async def download_handler(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
-        if match:
-            secure_hash = match.group(1)
-            id = int(match.group(2))
-        else:
-            id_match = re.search(r"(\d+)(?:\/\S+)?", path)
-            if not id_match:
-                raise web.HTTPNotFound(text="Not found")
-            id = int(id_match.group(1))
-            secure_hash = request.rel_url.query.get("hash")
-        return await media_streamer(request, id, secure_hash, is_download=True)
-    except InvalidHash as e:
-        raise web.HTTPForbidden(text=e.message)
-    except FIleNotFound as e:
-        raise web.HTTPNotFound(text=e.message)
-    except web.HTTPNotFound:
-        raise
-    except (AttributeError, BadStatusLine, ConnectionResetError):
-        pass
-    except Exception as e:
-        logging.critical(e.with_traceback(None))
-        raise web.HTTPInternalServerError(text=str(e))
-
 @routes.get(r"/{path:\S+}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
@@ -79,18 +53,21 @@ async def stream_handler(request: web.Request):
             secure_hash = match.group(1)
             id = int(match.group(2))
         else:
+            # Try to extract ID from path
             id_match = re.search(r"(\d+)(?:\/\S+)?", path)
             if not id_match:
+                # Path doesn't contain any numeric ID - return 404
                 raise web.HTTPNotFound(text="Not found")
             id = int(id_match.group(1))
             secure_hash = request.rel_url.query.get("hash")
-        return await media_streamer(request, id, secure_hash, is_download=False)
+        
+        return await media_streamer(request, id, secure_hash)
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except web.HTTPNotFound:
-        raise
+        raise  # Re-raise HTTPNotFound without logging
     except (AttributeError, BadStatusLine, ConnectionResetError):
         pass
     except Exception as e:
@@ -99,21 +76,30 @@ async def stream_handler(request: web.Request):
 
 class_cache = {}
 
-async def media_streamer(request: web.Request, id: int, secure_hash: str, is_download: bool = False):
+async def media_streamer(request: web.Request, id: int, secure_hash: str):
     range_header = request.headers.get("Range", 0)
+    
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
-    if info.MULTI_CLIENT:
+    
+    if MULTI_CLIENT:
         logging.info(f"Client {index} is now serving {request.remote}")
+
     if faster_client in class_cache:
         tg_connect = class_cache[faster_client]
+        logging.debug(f"Using cached ByteStreamer object for client {index}")
     else:
+        logging.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
     file_id = await tg_connect.get_file_properties(id)
+    
     if file_id.unique_id[:6] != secure_hash:
+        logging.debug(f"Invalid hash for message with ID {id}")
         raise InvalidHash
+    
     file_size = file_id.file_size
+
     if range_header:
         from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
         from_bytes = int(from_bytes)
@@ -121,23 +107,31 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
     else:
         from_bytes = request.http_range.start or 0
         until_bytes = (request.http_range.stop or file_size) - 1
+
     if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(status=416, body="416: Range not satisfiable", headers={"Content-Range": f"bytes */{file_size}"})
+        return web.Response(
+            status=416,
+            body="416: Range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
     chunk_size = 1024 * 1024
     until_bytes = min(until_bytes, file_size - 1)
+
     offset = from_bytes - (from_bytes % chunk_size)
     first_part_cut = from_bytes - offset
     last_part_cut = until_bytes % chunk_size + 1
+
     req_length = until_bytes - from_bytes + 1
     part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
-    body = tg_connect.yield_file(file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+    body = tg_connect.yield_file(
+        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
+    )
+
     mime_type = file_id.mime_type
     file_name = file_id.file_name
-    disposition = "attachment" if is_download else "inline"
-    # FileStream jaisa - H264 mkv ko Chrome pe chalane ke liye
-    if file_name and file_name.lower().endswith(".mkv"):
-        if "h265" not in file_name.lower() and "hevc" not in file_name.lower():
-            mime_type = "video/mp4"
+    disposition = "attachment"
+
     if mime_type:
         if not file_name:
             try:
@@ -146,12 +140,11 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
                 file_name = f"{secrets.token_hex(2)}.unknown"
     else:
         if file_name:
-            mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-            if file_name.lower().endswith(".mkv") and "h265" not in file_name.lower() and "hevc" not in file_name.lower():
-                mime_type = "video/mp4"
+            mime_type = mimetypes.guess_type(file_id.file_name)
         else:
             mime_type = "application/octet-stream"
             file_name = f"{secrets.token_hex(2)}.unknown"
+
     return web.Response(
         status=206 if range_header else 200,
         body=body,
@@ -159,8 +152,9 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
             "Content-Type": f"{mime_type}",
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
+            "Content-Disposition": f'inline; filename="{file_name}"',  # inline for streaming
             "Accept-Ranges": "bytes",
+            # CORS headers for JSMKV
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
             "Access-Control-Allow-Headers": "Range, Content-Type",
