@@ -11,7 +11,6 @@ from dreamxbotz.util.custom_dl import ByteStreamer
 from dreamxbotz.util.render_template import render_page
 import info
 
-
 routes = web.RouteTableDef()
 
 @routes.get("/favicon.ico")
@@ -132,15 +131,13 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
     req_length = until_bytes - from_bytes + 1
     part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
     body = tg_connect.yield_file(file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
-
     mime_type = file_id.mime_type
     file_name = file_id.file_name
     disposition = "attachment" if is_download else "inline"
-
-    # FIX: H264 wale mkv ko Chrome pe chalane ke liye mp4 bol ke bhej
-    if file_name and file_name.lower().endswith(".mkv") and "h265" not in file_name.lower() and "hevc" not in file_name.lower():
-        mime_type = "video/mp4"
-
+    # FileStream jaisa - H264 mkv ko Chrome pe chalane ke liye
+    if file_name and file_name.lower().endswith(".mkv"):
+        if "h265" not in file_name.lower() and "hevc" not in file_name.lower():
+            mime_type = "video/mp4"
     if mime_type:
         if not file_name:
             try:
@@ -155,7 +152,6 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str, is_dow
         else:
             mime_type = "application/octet-stream"
             file_name = f"{secrets.token_hex(2)}.unknown"
-
     return web.Response(
         status=206 if range_header else 200,
         body=body,
