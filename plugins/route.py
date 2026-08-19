@@ -2,7 +2,6 @@ from aiohttp import web
 import re
 import math
 import logging
-import secrets
 import mimetypes
 
 from aiohttp.http_exceptions import BadStatusLine
@@ -25,6 +24,27 @@ async def favicon_route_handler(request):
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
     return web.json_response("dreamxbotz")
+
+
+def parse_path(path: str, request: web.Request):
+    match = re.search(r"^([A-Za-z0-9_-]{6})(\d+)", path)
+
+    if match:
+        secure_hash = match.group(1)
+        file_id = int(match.group(2))
+        return file_id, secure_hash
+
+    id_match = re.search(r"(\d+)", path)
+    if not id_match:
+        raise web.HTTPNotFound(text="Invalid path")
+
+    file_id = int(id_match.group(1))
+    secure_hash = request.rel_url.query.get("hash")
+
+    if not secure_hash:
+        raise web.HTTPForbidden(text="Missing hash")
+
+    return file_id, secure_hash
 
 
 @routes.get(r"/watch/{path:\S+}", allow_head=True)
@@ -52,16 +72,36 @@ async def watch_handler(request: web.Request):
 
 
 @routes.get(r"/dl/{path:\S+}", allow_head=True)
+async def player_stream_handler(request: web.Request):
+    try:
+        path = request.match_info["path"]
+        file_id, secure_hash = parse_path(path, request)
+
+        return await media_streamer(
+            request, file_id, secure_hash, download=False
+        )
+
+    except InvalidHash as e:
+        raise web.HTTPForbidden(text=str(e))
+    except FIleNotFound as e:
+        raise web.HTTPNotFound(text=str(e))
+    except web.HTTPNotFound:
+        raise
+    except (AttributeError, BadStatusLine, ConnectionResetError):
+        raise
+    except Exception as e:
+        logging.exception("Player stream route error")
+        raise web.HTTPInternalServerError(text=str(e))
+
+
+@routes.get(r"/download/{path:\S+}", allow_head=True)
 async def download_handler(request: web.Request):
     try:
         path = request.match_info["path"]
         file_id, secure_hash = parse_path(path, request)
 
         return await media_streamer(
-            request,
-            file_id,
-            secure_hash,
-            download=True,
+            request, file_id, secure_hash, download=True
         )
 
     except InvalidHash as e:
@@ -75,60 +115,6 @@ async def download_handler(request: web.Request):
     except Exception as e:
         logging.exception("Download route error")
         raise web.HTTPInternalServerError(text=str(e))
-
-
-# Backward-compatible direct stream route
-@routes.get(r"/{path:\S+}", allow_head=True)
-async def stream_handler(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        file_id, secure_hash = parse_path(path, request)
-
-        return await media_streamer(
-            request,
-            file_id,
-            secure_hash,
-            download=False,
-        )
-
-    except InvalidHash as e:
-        raise web.HTTPForbidden(text=str(e))
-    except FIleNotFound as e:
-        raise web.HTTPNotFound(text=str(e))
-    except web.HTTPNotFound:
-        raise
-    except (AttributeError, BadStatusLine, ConnectionResetError):
-        raise
-    except Exception as e:
-        logging.exception("Stream route error")
-        raise web.HTTPInternalServerError(text=str(e))
-
-
-def parse_path(path: str, request: web.Request):
-    """
-    Supports:
-      /watch/ABCDEF123/file.mkv?hash=ABCDEF
-      /dl/ABCDEF123/file.mkv?hash=ABCDEF
-      /123/file.mkv?hash=ABCDEF
-    """
-    match = re.search(r"^([A-Za-z0-9_-]{6})(\d+)", path)
-
-    if match:
-        secure_hash = match.group(1)
-        file_id = int(match.group(2))
-        return file_id, secure_hash
-
-    id_match = re.search(r"(\d+)", path)
-    if not id_match:
-        raise web.HTTPNotFound(text="Invalid file path")
-
-    file_id = int(id_match.group(1))
-    secure_hash = request.rel_url.query.get("hash")
-
-    if not secure_hash:
-        raise web.HTTPForbidden(text="Missing hash")
-
-    return file_id, secure_hash
 
 
 class_cache = {}
@@ -167,13 +153,8 @@ async def media_streamer(
     if range_header:
         range_value = range_header.replace("bytes=", "", 1)
         start_text, end_text = range_value.split("-", 1)
-
         from_bytes = int(start_text or 0)
-        until_bytes = (
-            int(end_text)
-            if end_text
-            else file_size - 1
-        )
+        until_bytes = int(end_text) if end_text else file_size - 1
     else:
         http_range = request.http_range
         from_bytes = http_range.start or 0
@@ -196,11 +177,9 @@ async def media_streamer(
         )
 
     chunk_size = 1024 * 1024
-
     offset = from_bytes - (from_bytes % chunk_size)
     first_part_cut = from_bytes - offset
     last_part_cut = (until_bytes % chunk_size) + 1
-
     request_length = until_bytes - from_bytes + 1
     part_count = (
         math.ceil(until_bytes / chunk_size)
@@ -233,13 +212,9 @@ async def media_streamer(
         body=body,
         headers={
             "Content-Type": mime_type,
-            "Content-Range": (
-                f"bytes {from_bytes}-{until_bytes}/{file_size}"
-            ),
+            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(request_length),
-            "Content-Disposition": (
-                f'{disposition}; filename="{file_name}"'
-            ),
+            "Content-Disposition": f'{disposition}; filename="{file_name}"',
             "Accept-Ranges": "bytes",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
@@ -248,4 +223,4 @@ async def media_streamer(
                 "Content-Length, Content-Range, Accept-Ranges"
             ),
         },
-        )
+                              )
