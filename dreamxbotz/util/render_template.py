@@ -31,9 +31,8 @@ async def render_page(id, secure_hash, src=None):
     file_name = file_data.file_name or f"file_{id}"
     encoded_name = urllib.parse.quote(file_name, safe="")
 
-    # FileStreamBot-style direct media source.
-    # req.html ka {{ file_url }} isi URL ko use karega.
-    file_url = urllib.parse.urljoin(
+    # Player source -> /dl/ (inline)
+    src = urllib.parse.urljoin(
         URL,
         f"dl/{id}/{encoded_name}?hash={secure_hash}",
     )
@@ -48,12 +47,12 @@ async def render_page(id, secure_hash, src=None):
     else:
         template_file = "dreamxbotz/template/dl.html"
 
-    with open(template_file, "r", encoding="utf-8") as template_source:
-        template = jinja2.Template(template_source.read())
+    with open(template_file, "r", encoding="utf-8") as f:
+        template = jinja2.Template(f.read())
 
     return template.render(
         file_name=file_name.replace("_", " "),
-        file_url=file_url,
+        file_url=src,
         file_size=file_size,
         file_unique_id=file_data.unique_id,
         mime_type=mime_type,
