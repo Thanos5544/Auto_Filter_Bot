@@ -220,7 +220,7 @@ FQDN = (
     else f"{APP_NAME}.herokuapp.com"
 )
 FQDN = re.sub(r'^https?://', '', str(FQDN)).rstrip('/')
-NO_PORT = is_enabled(environ.get('NO_PORT'), True)
+NO_PORT = is_enabled(environ.get('NO_PORT'), False)
 HAS_SSL = is_enabled(getenv('HAS_SSL'), True)
 
 if HAS_SSL:
