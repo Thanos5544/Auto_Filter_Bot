@@ -44,6 +44,34 @@ async def watch_handler(request: web.Request):
         logging.critical(e.with_traceback(None))
         raise web.HTTPInternalServerError(text=str(e))
 
+@routes.get(r"/dl/{path:\S+}", allow_head=True)
+async def download_handler(request: web.Request):
+    try:
+        path = request.match_info["path"]
+        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
+        if match:
+            secure_hash = match.group(1)
+            id = int(match.group(2))
+        else:
+            id_match = re.search(r"(\d+)(?:\/\S+)?", path)
+            if not id_match:
+                raise web.HTTPNotFound(text="Not found")
+            id = int(id_match.group(1))
+            secure_hash = request.rel_url.query.get("hash")
+
+        return await media_streamer(request, id, secure_hash, download=True)
+    except InvalidHash as e:
+        raise web.HTTPForbidden(text=e.message)
+    except FIleNotFound as e:
+        raise web.HTTPNotFound(text=e.message)
+    except web.HTTPNotFound:
+        raise
+    except (AttributeError, BadStatusLine, ConnectionResetError):
+        pass
+    except Exception as e:
+        logging.critical(e.with_traceback(None))
+        raise web.HTTPInternalServerError(text=str(e))
+
 @routes.get(r"/{path:\S+}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
@@ -53,21 +81,19 @@ async def stream_handler(request: web.Request):
             secure_hash = match.group(1)
             id = int(match.group(2))
         else:
-            # Try to extract ID from path
             id_match = re.search(r"(\d+)(?:\/\S+)?", path)
             if not id_match:
-                # Path doesn't contain any numeric ID - return 404
                 raise web.HTTPNotFound(text="Not found")
             id = int(id_match.group(1))
             secure_hash = request.rel_url.query.get("hash")
-        
-        return await media_streamer(request, id, secure_hash)
+
+        return await media_streamer(request, id, secure_hash, download=False)
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except web.HTTPNotFound:
-        raise  # Re-raise HTTPNotFound without logging
+        raise
     except (AttributeError, BadStatusLine, ConnectionResetError):
         pass
     except Exception as e:
@@ -76,12 +102,12 @@ async def stream_handler(request: web.Request):
 
 class_cache = {}
 
-async def media_streamer(request: web.Request, id: int, secure_hash: str):
+async def media_streamer(request: web.Request, id: int, secure_hash: str, download: bool = False):
     range_header = request.headers.get("Range", 0)
-    
+
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
-    
+
     if MULTI_CLIENT:
         logging.info(f"Client {index} is now serving {request.remote}")
 
@@ -92,12 +118,13 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
         logging.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
+
     file_id = await tg_connect.get_file_properties(id)
-    
+
     if file_id.unique_id[:6] != secure_hash:
         logging.debug(f"Invalid hash for message with ID {id}")
         raise InvalidHash
-    
+
     file_size = file_id.file_size
 
     if range_header:
@@ -130,7 +157,7 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
 
     mime_type = file_id.mime_type
     file_name = file_id.file_name
-    disposition = "attachment"
+    disposition = "attachment" if download else "inline"
 
     if mime_type:
         if not file_name:
@@ -152,9 +179,8 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
             "Content-Type": f"{mime_type}",
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'inline; filename="{file_name}"',  # inline for streaming
+            "Content-Disposition": f'{disposition}; filename="{file_name}"',
             "Accept-Ranges": "bytes",
-            # CORS headers for JSMKV
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
             "Access-Control-Allow-Headers": "Range, Content-Type",
